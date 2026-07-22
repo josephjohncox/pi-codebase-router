@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-22
+
+### Changed
+
+- Auto-indexing now runs **in the background** as a detached
+  `opencode-codebase-index` MCP subprocess (driven over stdio with a single
+  `index_codebase` call) instead of queuing a follow-up agent turn. No agent
+  turn, no LLM cost, non-blocking. Uses host `pi` so it writes the same
+  `.codebase-index/` directory Pi's tools read.
+- Concurrent writes coalesce into one follow-up index; the subprocess is killed
+  on session shutdown (indexing is incremental and resumes).
+
+### Added
+
+- `PI_CODEBASE_INDEX_BIN` to point at the CLI explicitly.
+- `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` to opt back into the legacy
+  follow-up-turn path. The extension also auto-falls-back to it if the CLI
+  can't be located or spawned.
+
 ## [0.1.0] - 2026-07-22
 
 ### Added

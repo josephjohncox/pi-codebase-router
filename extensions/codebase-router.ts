@@ -1,7 +1,10 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
+import {
+	CONFIG_DIR_NAME,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -18,10 +21,13 @@ import { join } from "node:path";
  *   warn              - allow them but surface a status hint + inject guidance
  *   off               - passive; no prompt, no guard, no auto-index
  *
- * Optional auto-indexing (only when mode !== off):
- *   PI_CODEBASE_AUTO_INDEX=1            queue /cbindex on session start
- *   PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1  queue /cbindex after a settled turn
- *                                         that used write/edit
+ * Optional background auto-indexing (only when mode !== off). Indexing runs in
+ * a detached opencode-codebase-index MCP subprocess — no agent turn, no LLM
+ * cost, non-blocking:
+ *   PI_CODEBASE_AUTO_INDEX=1              index on session start
+ *   PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1  index after a settled write/edit turn
+ *   PI_CODEBASE_INDEX_BIN=/path/cli.js    override CLI (MCP server) location
+ *   PI_CODEBASE_AUTO_INDEX_VIA_TURN=1     force the legacy follow-up-turn path
  */
 
 type Mode = "off" | "warn" | "enforce";
@@ -53,6 +59,11 @@ const WRITE_REASON =
 const INDEX_TOOLS =
 	/^(?:codebase_peek|codebase_search|implementation_lookup|call_graph|call_graph_path|pr_impact)$/;
 
+// Must match opencode-codebase-index's Pi host so the background index writes
+// to the same directory Pi's in-process codebase_search reads.
+const INDEX_HOST = "pi";
+const INDEX_TIMEOUT_MS = 15 * 60 * 1000;
+
 const AUTO_INDEX_SESSION_REASONS = new Set(["startup", "new", "resume", "fork"]);
 const PROJECT_MARKERS = [
 	".git",
@@ -78,6 +89,31 @@ function envOn(name: string): boolean {
 
 function isProjectDirectory(cwd: string): boolean {
 	return PROJECT_MARKERS.some((marker) => existsSync(join(cwd, marker)));
+}
+
+/**
+ * Locate the opencode-codebase-index CLI (an MCP server). Returns argv to launch
+ * it via Node, or null to fall back to `npx`.
+ */
+function resolveIndexLauncher(
+	cwd: string,
+): { cmd: string; args: string[] } | null {
+	const rel = join(
+		"npm",
+		"node_modules",
+		"opencode-codebase-index",
+		"dist",
+		"cli.js",
+	);
+	const candidates = [
+		process.env.PI_CODEBASE_INDEX_BIN,
+		join(getAgentDir(), rel),
+		join(cwd, CONFIG_DIR_NAME, rel),
+	].filter((value): value is string => Boolean(value));
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) return { cmd: process.execPath, args: [candidate] };
+	}
+	return null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -168,25 +204,161 @@ function classifyBashCommand(command: string): Classification {
 export default function codebaseRouterExtension(pi: ExtensionAPI) {
 	let blockedCount = 0;
 	let indexedCalls = 0;
-	let autoIndexQueued = false;
 	let pendingMutation = false;
+
+	// Background-index lifecycle state.
+	let indexChild: ChildProcess | null = null;
+	let indexing = false;
+	let dirty = false;
+	let followUpQueued = false;
 
 	const setStatus = (ctx: ExtensionContext, text: string | undefined) => {
 		ctx.ui.setStatus(STATUS_KEY, text);
 	};
 
-	const queueIncrementalIndex = (ctx: ExtensionContext): boolean => {
-		if (autoIndexQueued || !isProjectDirectory(ctx.cwd)) return false;
-		autoIndexQueued = true;
-		setStatus(ctx, "codebase: incremental index queued");
+	/** Legacy path: ask the agent to run /cbindex on a follow-up turn. */
+	const queueFollowUpIndex = (ctx: ExtensionContext): void => {
+		if (followUpQueued) return;
+		followUpQueued = true;
+		setStatus(ctx, "codebase: /cbindex queued (turn)");
 		try {
 			pi.sendUserMessage("/cbindex", { deliverAs: "followUp" });
-			return true;
 		} catch {
-			autoIndexQueued = false;
+			followUpQueued = false;
 			setStatus(ctx, "codebase: use /cbindex");
-			return false;
 		}
+	};
+
+	/**
+	 * Background path: drive one index_codebase call over MCP stdio against a
+	 * detached opencode-codebase-index server, then let it exit. No agent turn.
+	 */
+	const runBackgroundIndex = (ctx: ExtensionContext): void => {
+		if (!isProjectDirectory(ctx.cwd)) return;
+		if (indexing) {
+			dirty = true;
+			return;
+		}
+		if (envOn("PI_CODEBASE_AUTO_INDEX_VIA_TURN")) {
+			queueFollowUpIndex(ctx);
+			return;
+		}
+
+		const launcher = resolveIndexLauncher(ctx.cwd);
+		const cmd = launcher?.cmd ?? "npx";
+		const args = launcher
+			? [...launcher.args, "--project", ctx.cwd, "--host", INDEX_HOST]
+			: [
+					"-y",
+					"--package",
+					"opencode-codebase-index",
+					"opencode-codebase-index-mcp",
+					"--project",
+					ctx.cwd,
+					"--host",
+					INDEX_HOST,
+				];
+
+		let child: ChildProcess;
+		try {
+			child = spawn(cmd, args, {
+				cwd: ctx.cwd,
+				stdio: ["pipe", "pipe", "ignore"],
+			});
+		} catch {
+			queueFollowUpIndex(ctx); // fall back to the turn-based path
+			return;
+		}
+
+		indexing = true;
+		dirty = false;
+		indexChild = child;
+		setStatus(ctx, "codebase: indexing… (background)");
+
+		let settled = false;
+		let started = false;
+		let buffer = "";
+		const send = (message: unknown) => {
+			try {
+				child.stdin?.write(`${JSON.stringify(message)}\n`);
+			} catch {
+				/* server gone; exit handler cleans up */
+			}
+		};
+		const stop = () => {
+			if (settled) return;
+			settled = true;
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				/* already gone */
+			}
+		};
+		const timer = setTimeout(() => {
+			setStatus(ctx, "codebase: index timed out");
+			stop();
+		}, INDEX_TIMEOUT_MS);
+
+		child.stdout?.on("data", (chunk: Buffer) => {
+			started = true;
+			buffer += chunk.toString();
+			let newline: number;
+			while ((newline = buffer.indexOf("\n")) >= 0) {
+				const line = buffer.slice(0, newline).trim();
+				buffer = buffer.slice(newline + 1);
+				if (!line) continue;
+				let message: { id?: number; result?: unknown; error?: unknown };
+				try {
+					message = JSON.parse(line);
+				} catch {
+					continue;
+				}
+				if (message.id === 1 && message.result) {
+					send({ jsonrpc: "2.0", method: "notifications/initialized" });
+					send({
+						jsonrpc: "2.0",
+						id: 2,
+						method: "tools/call",
+						params: { name: "index_codebase", arguments: {} },
+					});
+				} else if (message.id === 2) {
+					setStatus(
+						ctx,
+						message.error
+							? "codebase: index error"
+							: "codebase: index refreshed (background)",
+					);
+					stop();
+				}
+			}
+		});
+
+		child.on("error", () => {
+			clearTimeout(timer);
+			indexing = false;
+			indexChild = null;
+			if (!started) queueFollowUpIndex(ctx); // launcher missing → turn fallback
+		});
+
+		child.on("exit", () => {
+			clearTimeout(timer);
+			indexing = false;
+			indexChild = null;
+			const wasDirty = dirty;
+			dirty = false;
+			if (wasDirty) runBackgroundIndex(ctx); // coalesced re-run
+		});
+
+		send({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: {
+				protocolVersion: "2025-06-18",
+				capabilities: {},
+				clientInfo: { name: "pi-codebase-router", version: "0.1.0" },
+			},
+		});
 	};
 
 	pi.on("session_start", (event, ctx) => {
@@ -211,7 +383,7 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 			envOn("PI_CODEBASE_AUTO_INDEX") &&
 			AUTO_INDEX_SESSION_REASONS.has(event.reason)
 		) {
-			queueIncrementalIndex(ctx);
+			runBackgroundIndex(ctx);
 		}
 	});
 
@@ -254,7 +426,7 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 		if (resolveMode() === "off") return;
 
 		if (event.toolName === "index_codebase") {
-			autoIndexQueued = false;
+			followUpQueued = false;
 			pendingMutation = false;
 			setStatus(ctx, "codebase-router: index current");
 			return;
@@ -272,20 +444,27 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", (_event, ctx) => {
 		if (resolveMode() === "off") return;
-		if (
-			envOn("PI_CODEBASE_AUTO_INDEX_AFTER_WRITE") &&
-			pendingMutation &&
-			queueIncrementalIndex(ctx)
-		) {
+		if (envOn("PI_CODEBASE_AUTO_INDEX_AFTER_WRITE") && pendingMutation) {
 			pendingMutation = false;
+			runBackgroundIndex(ctx);
 		}
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		setStatus(ctx, undefined);
+		if (indexChild) {
+			try {
+				indexChild.kill("SIGTERM");
+			} catch {
+				/* already gone */
+			}
+			indexChild = null;
+		}
 		blockedCount = 0;
 		indexedCalls = 0;
-		autoIndexQueued = false;
 		pendingMutation = false;
+		indexing = false;
+		dirty = false;
+		followUpQueued = false;
 	});
 }

@@ -1,6 +1,6 @@
 {
   "name": "pi-codebase-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Index-first routing for Pi: prefer the opencode-codebase-index semantic index over grep/shell, with guardrails, cb* prompts, a workflow skill, and optional session-start / after-write auto-indexing.",
   "type": "module",
   "license": "MIT",
@@ -58,6 +58,8 @@
     }
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },
   "publishConfig": {

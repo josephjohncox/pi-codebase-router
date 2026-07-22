@@ -46,13 +46,15 @@ mutations. Avoid `cat`, `sed`, `head`, `tail`, shell redirection, `tee`,
   incremental. In Pi, opt into the after-write hook if automatic refresh is
   required.
 
-## Optional session-start indexing
+## Optional background indexing
 
-Set `PI_CODEBASE_AUTO_INDEX=1` to queue a normal `/cbindex` on startup, resume,
-new-session, or fork events when the cwd looks like a project. Set
-`PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` as well to queue one incremental index
-after a settled turn that used `write` or `edit`. These are opt-in because they
-create agent turns; they never request a force rebuild.
+`PI_CODEBASE_AUTO_INDEX=1` (session start) and
+`PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` (after a settled write/edit turn) trigger
+an **incremental** index. It runs in the background as a detached
+`opencode-codebase-index` subprocess — no agent turn, no LLM cost, non-blocking
+— into the same `.codebase-index/` directory the search tools read. Never a
+force rebuild. Set `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` to use a follow-up agent
+turn instead.
 
 ## Compact workflow
 

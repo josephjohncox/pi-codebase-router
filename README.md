@@ -58,27 +58,38 @@ The guard is deliberately conservative: single-token identifier-shaped patterns,
 fd redirects (`2>/dev/null`, `2>&1`), and normal toolchain commands are never
 blocked.
 
-### 3. Optional auto-indexing
+### 3. Optional background auto-indexing
 
-Off by default. Enable per your shell/profile or `.pi` env:
+Off by default. When enabled, indexing runs **in the background** — a detached
+`opencode-codebase-index` MCP subprocess does the work. There is **no agent
+turn and no LLM cost**, and Pi is never blocked: you keep typing while the index
+refreshes into the same `.codebase-index/` directory Pi's `codebase_search`
+reads (host `pi`).
 
 | Env var | Effect |
 | --- | --- |
-| `PI_CODEBASE_AUTO_INDEX=1` | Queue a normal `/cbindex` on session start / resume / new / fork when the cwd looks like a project. |
-| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` | After a settled turn that used `write`/`edit`, queue one incremental `/cbindex`. |
+| `PI_CODEBASE_AUTO_INDEX=1` | Background index on session start / resume / new / fork when the cwd looks like a project. |
+| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` | After a settled turn that used `write`/`edit`, background index once. |
+| `PI_CODEBASE_INDEX_BIN=/abs/path/dist/cli.js` | Point at the `opencode-codebase-index` CLI explicitly (otherwise auto-located under `~/.pi/agent/npm`, the project's `.pi/npm`, or `npx`). |
+| `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` | Revert to the legacy behavior: queue `/cbindex` as a follow-up **agent turn** instead of a background subprocess. |
 
-Both only queue an **incremental** index (never `force`), only in project
-directories (detected via `.git`, `package.json`, `pyproject.toml`,
-`Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`), and de-dupe so at most one
-index is in flight.
+Always an **incremental** index (never `force`), only in project directories
+(detected via `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`,
+`pom.xml`, `build.gradle`). At most one index runs at a time; writes that land
+during a run coalesce into a single follow-up index. The subprocess is killed on
+session shutdown (indexing is incremental and resumes next time). If the CLI
+can't be located or spawned, it automatically falls back to the follow-up-turn
+path.
 
 ## Configuration
 
 | Env var | Values | Default | Meaning |
 | --- | --- | --- | --- |
 | `PI_CODEBASE_ROUTER_MODE` | `enforce` \| `warn` \| `off` | `enforce` | `enforce` blocks discouraged calls; `warn` allows them but shows a status hint and still injects guidance; `off` disables everything (no prompt, no guard, no auto-index). |
-| `PI_CODEBASE_AUTO_INDEX` | `1` | unset | Auto-index on session start. |
-| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE` | `1` | unset | Auto-index after settled write/edit turns. |
+| `PI_CODEBASE_AUTO_INDEX` | `1` | unset | Background index on session start. |
+| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE` | `1` | unset | Background index after settled write/edit turns. |
+| `PI_CODEBASE_INDEX_BIN` | path | auto | Explicit path to `opencode-codebase-index`'s `dist/cli.js`. |
+| `PI_CODEBASE_AUTO_INDEX_VIA_TURN` | `1` | unset | Use a follow-up agent turn instead of a background subprocess. |
 
 ## Commands (prompt templates)
 
