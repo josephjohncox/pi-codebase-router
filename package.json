@@ -1,0 +1,66 @@
+{
+  "name": "pi-codebase-router",
+  "version": "0.1.0",
+  "description": "Index-first routing for Pi: prefer the opencode-codebase-index semantic index over grep/shell, with guardrails, cb* prompts, a workflow skill, and optional session-start / after-write auto-indexing.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Joseph Cox <abovemind@gmail.com>",
+  "homepage": "https://github.com/josephjohncox/pi-codebase-router#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/josephjohncox/pi-codebase-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/josephjohncox/pi-codebase-router/issues"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "codebase-index",
+    "opencode-codebase-index",
+    "semantic-search",
+    "grep",
+    "routing",
+    "developer-tools"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "prompts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
