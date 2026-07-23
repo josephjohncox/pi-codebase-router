@@ -5,7 +5,8 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -16,21 +17,46 @@ import { join } from "node:path";
  * implementation_lookup / call_graph) instead of exploratory grep and shell,
  * and keeps file reads/writes on the built-in read/edit/write tools.
  *
- * Modes (env PI_CODEBASE_ROUTER_MODE):
- *   enforce (default) - block discouraged grep/shell calls
- *   warn              - allow them but surface a status hint + inject guidance
- *   off               - passive; no prompt, no guard, no auto-index
+ * Configuration (precedence: env var > project router.json > global
+ * router.json > default):
+ *   global  router.json: $XDG_CONFIG_HOME/codebase-index/router.json
+ *                        (default ~/.config/codebase-index/router.json)
+ *   project router.json: <cwd>/.codebase-index/router.json
  *
- * Optional background auto-indexing (only when mode !== off). Indexing runs in
- * a detached opencode-codebase-index MCP subprocess — no agent turn, no LLM
- * cost, non-blocking:
- *   PI_CODEBASE_AUTO_INDEX=1              index on session start
- *   PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1  index after a settled write/edit turn
- *   PI_CODEBASE_INDEX_BIN=/path/cli.js    override CLI (MCP server) location
- *   PI_CODEBASE_AUTO_INDEX_VIA_TURN=1     force the legacy follow-up-turn path
+ *   router.json keys      env override                         values
+ *   --------------------  -----------------------------------  ---------------
+ *   mode                  PI_CODEBASE_ROUTER_MODE              off|warn|enforce
+ *   autoIndex             PI_CODEBASE_AUTO_INDEX               bool
+ *   autoIndexAfterWrite   PI_CODEBASE_AUTO_INDEX_AFTER_WRITE   bool
+ *   autoIndexViaTurn      PI_CODEBASE_AUTO_INDEX_VIA_TURN      bool
+ *   indexBin              PI_CODEBASE_INDEX_BIN                path to cli.js
+ *   indexTimeoutMs        PI_CODEBASE_INDEX_TIMEOUT_MS         positive int
+ *
+ * Env booleans: "1"/"true"/"yes"/"on" = true, "0"/"false"/"no"/"off" = false,
+ * anything else / unset = no override.
+ *
+ * Background auto-indexing runs opencode-codebase-index as a detached MCP
+ * subprocess (host "pi") — no agent turn, no LLM cost, non-blocking.
  */
 
 type Mode = "off" | "warn" | "enforce";
+
+interface RouterConfig {
+	mode: Mode;
+	autoIndex: boolean;
+	autoIndexAfterWrite: boolean;
+	autoIndexViaTurn: boolean;
+	indexBin?: string;
+	indexTimeoutMs: number;
+}
+
+const DEFAULT_CONFIG: RouterConfig = {
+	mode: "enforce",
+	autoIndex: false,
+	autoIndexAfterWrite: false,
+	autoIndexViaTurn: false,
+	indexTimeoutMs: 15 * 60 * 1000,
+};
 
 const STATUS_KEY = "codebase-router";
 
@@ -62,7 +88,6 @@ const INDEX_TOOLS =
 // Must match opencode-codebase-index's Pi host so the background index writes
 // to the same directory Pi's in-process codebase_search reads.
 const INDEX_HOST = "pi";
-const INDEX_TIMEOUT_MS = 15 * 60 * 1000;
 
 const AUTO_INDEX_SESSION_REASONS = new Set(["startup", "new", "resume", "fork"]);
 const PROJECT_MARKERS = [
@@ -77,14 +102,84 @@ const PROJECT_MARKERS = [
 const TOOLCHAIN_PATTERN =
 	/\b(?:git|npm|pnpm|yarn|bun|cargo|pytest|vitest|jest|make|go|deno)\b/;
 
-function resolveMode(): Mode {
-	const value = (process.env.PI_CODEBASE_ROUTER_MODE ?? "").trim().toLowerCase();
-	if (value === "off" || value === "warn" || value === "enforce") return value;
-	return "enforce";
+// ---------------------------------------------------------------------------
+// Configuration (router.json + env)
+// ---------------------------------------------------------------------------
+
+function xdgConfigHome(): string {
+	const value = process.env.XDG_CONFIG_HOME;
+	return value && value.trim() ? value : join(homedir(), ".config");
 }
 
-function envOn(name: string): boolean {
-	return process.env[name] === "1";
+/** [global, project] router.json paths; project overrides global. */
+function routerConfigPaths(cwd: string): [string, string] {
+	return [
+		join(xdgConfigHome(), "codebase-index", "router.json"),
+		join(cwd, ".codebase-index", "router.json"),
+	];
+}
+
+function coerceMode(value: unknown): Mode | undefined {
+	if (typeof value !== "string") return undefined;
+	const v = value.trim().toLowerCase();
+	return v === "off" || v === "warn" || v === "enforce" ? v : undefined;
+}
+
+function coerceFileBool(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function coerceEnvBool(value: string | undefined): boolean | undefined {
+	if (value === undefined) return undefined;
+	const v = value.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(v)) return true;
+	if (["0", "false", "no", "off"].includes(v)) return false;
+	return undefined;
+}
+
+function readRouterFile(path: string): Partial<RouterConfig> {
+	let raw: Record<string, unknown>;
+	try {
+		if (!existsSync(path)) return {};
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		if (!parsed || typeof parsed !== "object") return {};
+		raw = parsed as Record<string, unknown>;
+	} catch {
+		return {};
+	}
+	const layer: Partial<RouterConfig> = {};
+	const mode = coerceMode(raw.mode);
+	if (mode) layer.mode = mode;
+	const autoIndex = coerceFileBool(raw.autoIndex);
+	if (autoIndex !== undefined) layer.autoIndex = autoIndex;
+	const afterWrite = coerceFileBool(raw.autoIndexAfterWrite);
+	if (afterWrite !== undefined) layer.autoIndexAfterWrite = afterWrite;
+	const viaTurn = coerceFileBool(raw.autoIndexViaTurn);
+	if (viaTurn !== undefined) layer.autoIndexViaTurn = viaTurn;
+	if (typeof raw.indexBin === "string" && raw.indexBin.trim()) {
+		layer.indexBin = raw.indexBin.trim();
+	}
+	if (typeof raw.indexTimeoutMs === "number" && raw.indexTimeoutMs > 0) {
+		layer.indexTimeoutMs = raw.indexTimeoutMs;
+	}
+	return layer;
+}
+
+function envLayer(): Partial<RouterConfig> {
+	const layer: Partial<RouterConfig> = {};
+	const mode = coerceMode(process.env.PI_CODEBASE_ROUTER_MODE);
+	if (mode) layer.mode = mode;
+	const autoIndex = coerceEnvBool(process.env.PI_CODEBASE_AUTO_INDEX);
+	if (autoIndex !== undefined) layer.autoIndex = autoIndex;
+	const afterWrite = coerceEnvBool(process.env.PI_CODEBASE_AUTO_INDEX_AFTER_WRITE);
+	if (afterWrite !== undefined) layer.autoIndexAfterWrite = afterWrite;
+	const viaTurn = coerceEnvBool(process.env.PI_CODEBASE_AUTO_INDEX_VIA_TURN);
+	if (viaTurn !== undefined) layer.autoIndexViaTurn = viaTurn;
+	const bin = process.env.PI_CODEBASE_INDEX_BIN;
+	if (bin && bin.trim()) layer.indexBin = bin.trim();
+	const timeout = Number(process.env.PI_CODEBASE_INDEX_TIMEOUT_MS);
+	if (Number.isFinite(timeout) && timeout > 0) layer.indexTimeoutMs = timeout;
+	return layer;
 }
 
 function isProjectDirectory(cwd: string): boolean {
@@ -97,6 +192,7 @@ function isProjectDirectory(cwd: string): boolean {
  */
 function resolveIndexLauncher(
 	cwd: string,
+	indexBin: string | undefined,
 ): { cmd: string; args: string[] } | null {
 	const rel = join(
 		"npm",
@@ -105,11 +201,9 @@ function resolveIndexLauncher(
 		"dist",
 		"cli.js",
 	);
-	const candidates = [
-		process.env.PI_CODEBASE_INDEX_BIN,
-		join(getAgentDir(), rel),
-		join(cwd, CONFIG_DIR_NAME, rel),
-	].filter((value): value is string => Boolean(value));
+	const candidates = [indexBin, join(getAgentDir(), rel), join(cwd, CONFIG_DIR_NAME, rel)].filter(
+		(value): value is string => Boolean(value),
+	);
 	for (const candidate of candidates) {
 		if (existsSync(candidate)) return { cmd: process.execPath, args: [candidate] };
 	}
@@ -212,6 +306,20 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 	let dirty = false;
 	let followUpQueued = false;
 
+	// Cached file-config layer, invalidated on each session_start (so editing
+	// router.json takes effect on /reload or a new session). Env is read live.
+	let fileLayerCwd: string | undefined;
+	let fileLayer: Partial<RouterConfig> = {};
+
+	const config = (cwd: string): RouterConfig => {
+		if (cwd !== fileLayerCwd) {
+			const [globalPath, projectPath] = routerConfigPaths(cwd);
+			fileLayer = { ...readRouterFile(globalPath), ...readRouterFile(projectPath) };
+			fileLayerCwd = cwd;
+		}
+		return { ...DEFAULT_CONFIG, ...fileLayer, ...envLayer() };
+	};
+
 	const setStatus = (ctx: ExtensionContext, text: string | undefined) => {
 		ctx.ui.setStatus(STATUS_KEY, text);
 	};
@@ -233,18 +341,18 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 	 * Background path: drive one index_codebase call over MCP stdio against a
 	 * detached opencode-codebase-index server, then let it exit. No agent turn.
 	 */
-	const runBackgroundIndex = (ctx: ExtensionContext): void => {
+	const runBackgroundIndex = (ctx: ExtensionContext, cfg: RouterConfig): void => {
 		if (!isProjectDirectory(ctx.cwd)) return;
 		if (indexing) {
 			dirty = true;
 			return;
 		}
-		if (envOn("PI_CODEBASE_AUTO_INDEX_VIA_TURN")) {
+		if (cfg.autoIndexViaTurn) {
 			queueFollowUpIndex(ctx);
 			return;
 		}
 
-		const launcher = resolveIndexLauncher(ctx.cwd);
+		const launcher = resolveIndexLauncher(ctx.cwd, cfg.indexBin);
 		const cmd = launcher?.cmd ?? "npx";
 		const args = launcher
 			? [...launcher.args, "--project", ctx.cwd, "--host", INDEX_HOST]
@@ -297,7 +405,7 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 		const timer = setTimeout(() => {
 			setStatus(ctx, "codebase: index timed out");
 			stop();
-		}, INDEX_TIMEOUT_MS);
+		}, cfg.indexTimeoutMs);
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			started = true;
@@ -346,7 +454,7 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 			indexChild = null;
 			const wasDirty = dirty;
 			dirty = false;
-			if (wasDirty) runBackgroundIndex(ctx); // coalesced re-run
+			if (wasDirty) runBackgroundIndex(ctx, config(ctx.cwd)); // coalesced re-run
 		});
 
 		send({
@@ -356,14 +464,15 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 			params: {
 				protocolVersion: "2025-06-18",
 				capabilities: {},
-				clientInfo: { name: "pi-codebase-router", version: "0.1.0" },
+				clientInfo: { name: "pi-codebase-router", version: "0.3.0" },
 			},
 		});
 	};
 
 	pi.on("session_start", (event, ctx) => {
-		const mode = resolveMode();
-		if (mode === "off") {
+		fileLayerCwd = undefined; // re-read router.json this session
+		const cfg = config(ctx.cwd);
+		if (cfg.mode === "off") {
 			setStatus(ctx, "codebase-router: off");
 			return;
 		}
@@ -374,27 +483,27 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 		setStatus(
 			ctx,
 			indexed
-				? `codebase-router: ${mode} · /cbindex if missing`
-				: "codebase-router: index tools unavailable (install opencode-codebase-index)",
+				? `codebase-router: ${cfg.mode} · /cbindex if missing`
+				: "codebase-router: index tools unavailable — pi install npm:opencode-codebase-index",
 		);
 
 		if (
 			indexed &&
-			envOn("PI_CODEBASE_AUTO_INDEX") &&
+			cfg.autoIndex &&
 			AUTO_INDEX_SESSION_REASONS.has(event.reason)
 		) {
-			runBackgroundIndex(ctx);
+			runBackgroundIndex(ctx, cfg);
 		}
 	});
 
-	pi.on("before_agent_start", (event) => {
-		if (resolveMode() === "off") return;
+	pi.on("before_agent_start", (event, ctx) => {
+		if (config(ctx.cwd).mode === "off") return;
 		if (!CODE_TASK_PATTERN.test(event.prompt)) return;
 		return { systemPrompt: `${event.systemPrompt}\n${ROUTING_INSTRUCTIONS}` };
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		const mode = resolveMode();
+		const mode = config(ctx.cwd).mode;
 		if (mode === "off") return;
 
 		const input = asRecord(event.input);
@@ -423,7 +532,8 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
-		if (resolveMode() === "off") return;
+		const cfg = config(ctx.cwd);
+		if (cfg.mode === "off") return;
 
 		if (event.toolName === "index_codebase") {
 			followUpQueued = false;
@@ -433,7 +543,7 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 		}
 
 		if (event.toolName === "write" || event.toolName === "edit") {
-			if (envOn("PI_CODEBASE_AUTO_INDEX_AFTER_WRITE")) pendingMutation = true;
+			if (cfg.autoIndexAfterWrite) pendingMutation = true;
 			return;
 		}
 
@@ -443,10 +553,11 @@ export default function codebaseRouterExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (resolveMode() === "off") return;
-		if (envOn("PI_CODEBASE_AUTO_INDEX_AFTER_WRITE") && pendingMutation) {
+		const cfg = config(ctx.cwd);
+		if (cfg.mode === "off") return;
+		if (cfg.autoIndexAfterWrite && pendingMutation) {
 			pendingMutation = false;
-			runBackgroundIndex(ctx);
+			runBackgroundIndex(ctx, cfg);
 		}
 	});
 

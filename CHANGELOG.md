@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-22
+
+### Added
+
+- **`router.json` config file** (in addition to env vars). Global
+  `~/.config/codebase-index/router.json` (respects `$XDG_CONFIG_HOME`) and
+  project `<repo>/.codebase-index/router.json`. Keys: `mode`, `autoIndex`,
+  `autoIndexAfterWrite`, `autoIndexViaTurn`, `indexBin`, `indexTimeoutMs`.
+  Precedence: env var > project file > global file > default. Env booleans
+  accept 1/true/yes/on and 0/false/no/off (so `=0` disables a file `true`).
+  Files are re-read on `/reload` and each new session.
+- `PI_CODEBASE_INDEX_TIMEOUT_MS` env override for the background-index timeout.
+- GitHub Actions: `ci.yml` (typecheck) and `publish.yml` (release-triggered
+  `npm publish --provenance`, with a manual dry-run and a tag/version check).
+- Declared `opencode-codebase-index` as an optional peer (documents the link
+  without auto-downloading its ~235 MB of native binaries).
+
+### Documentation
+
+- Ollama setup guide and an embedding-model recommendation table
+  (qwen3-embedding 8b/4b/0.6b, mxbai-embed-large, bge-m3, nomic-embed-text),
+  companion config locations/host, and why the companion is a separate install.
+
 ## [0.2.0] - 2026-07-22
 
 ### Changed

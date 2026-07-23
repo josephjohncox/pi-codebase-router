@@ -1,6 +1,6 @@
 {
   "name": "pi-codebase-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Index-first routing for Pi: prefer the opencode-codebase-index semantic index over grep/shell, with guardrails, cb* prompts, a workflow skill, and optional session-start / after-write auto-indexing.",
   "type": "module",
   "license": "MIT",
@@ -50,10 +50,14 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "opencode-codebase-index": ">=0.14.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "opencode-codebase-index": {
       "optional": true
     }
   },
