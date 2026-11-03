@@ -1,19 +1,23 @@
 ---
-description: Find code with token-efficient semantic discovery plus exact matching (codebase-index)
+description: Scoped indexed discovery without a mandatory retrieval chain (codebase-index)
 argument-hint: "<query>"
 ---
 # Indexed code search
 
-Use this workflow for: $@
+Find code for: $@
 
-1. Call `codebase_peek` first with a small limit to locate likely
-   implementations.
-2. If the user needs actual code, call `implementation_lookup` or
-   `codebase_search` only for the narrowed candidates.
-3. Use the built-in `grep` tool only after discovery, for exact
-   identifiers/literals or exhaustive occurrence checks.
-4. Read exact files/line ranges with the built-in `read` tool and summarize the
-   result.
+Check `index_status` if readiness is unknown. For unfamiliar subsystem
+orientation, optionally use `codebase_context` with tokenBudget: 600, limit: 5.
+For known definitions, use `implementation_lookup` directly; for callers/callees
+or identified dependency endpoints use `call_graph` / `call_graph_path`.
+Use `codebase_peek` for metadata-only locations or narrow `codebase_search` for
+semantic source matches when useful. No context/peek prerequisite chain.
+Read exact files/line ranges with built-in `read`; built-in read/edit/write are
+always allowed. Reserve grep for exact identifiers/literals or exhaustive checks
+when indexed discovery is usable.
 
-If the index is unavailable, stop and tell me to run /cbindex first. Do not
-replace conceptual discovery with broad grep or shell rg.
+If tools/index are unavailable, incompatible, migrating, or retrieval fails,
+report that briefly and continue with known-file/direct-tool fallback. Suggest
+incremental /cbindex for missing/stale indexes or storage migrations; do not
+force a rebuild automatically. Keep evidence within the actual cwd and requested
+directory; never substitute main-checkout results for sibling worktrees.

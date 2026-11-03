@@ -7,9 +7,11 @@ argument-hint: "<query>"
 Use the `codebase_search` tool to find code by meaning for:
 $@
 
-Prefer `codebase_peek` first when only locations are needed. Keep this search
-narrow with a small limit and relevant fileType, directory, chunkType, or
-contextLines=0.
+Use `codebase_search` directly for semantic source matches; `codebase_peek` is
+an optional alternative for metadata-only locations, not a prerequisite. Keep
+limits and fileType/directory/chunkType/contextLines=0 filters narrow. Check
+`index_status` when readiness is unknown; do not widen scope after a miss.
 
-If the tool reports the codebase is not indexed, stop and tell me to run
-/cbindex first (do not auto-index).
+If tools/index are unavailable or incompatible, report it, suggest /cbindex as
+appropriate, and allow focused known-file/direct-tool fallback. Do not force a
+rebuild or auto-index without being asked.

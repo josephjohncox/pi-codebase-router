@@ -2,10 +2,11 @@
 
 Index-first routing for [Pi](https://pi.dev). It makes the agent reach for the
 [`opencode-codebase-index`](https://www.npmjs.com/package/opencode-codebase-index)
-semantic tools (`codebase_peek`, `codebase_search`, `implementation_lookup`,
-`call_graph`) **before** falling back to exploratory `grep` and shell — which
-saves tokens and keeps context focused — and keeps file access/mutation on the
-built-in `read` / `edit` / `write` tools.
+semantic tools (`codebase_context`, `implementation_lookup`, `call_graph`,
+`codebase_search`) for scoped discovery, without a mandatory retrieval chain.
+It keeps context focused and file access/mutation on the built-in `read` /
+`edit` / `write` tools, which are **always allowed**. Missing/incompatible indexes
+and out-of-context work degrade to direct tools instead of trapping the agent.
 
 It bundles three things:
 
@@ -153,29 +154,45 @@ the full schema (chunking, hybrid weights, reranker, knowledge bases, etc.).
 
 ### 1. Index-first guidance (`before_agent_start`)
 
-On code/repository-flavored prompts it appends a short routing block to the
-system prompt: peek → look up the definition → `read` exact lines; reserve grep
-for exact identifiers; keep edits on `read`/`edit`/`write`; use `/cbindex` when
-the index is missing or stale.
+On code/repository-flavored user prompts it updates only the structured
+`systemPromptOptions.sections.codebase_router` section, allowing Pi to preserve
+its prompt prefix instead of forcing a complete system-prompt replacement. It
+clears that section for off/custom-message/non-code starts. Guidance:
+check `index_status` when readiness is unknown; optionally use compact
+`codebase_context` (`tokenBudget: 600`, `limit: 5`) for unfamiliar orientation;
+use `implementation_lookup` directly for definitions and `call_graph`/path for
+flow. `codebase_edit_context` is optional bounded pre-edit evidence. Peek/search
+remain optional tools, not mandatory prerequisites. Custom-message starts with
+no prompt are supported. Observed missing/incompatible/migration states and
+index-specific retrieval failures release guards and allow known-file/direct-tool
+fallback. Query-validation errors do not change index readiness, and successful
+source snippets are never interpreted as health diagnostics.
+Storage migrations use incremental indexing, not an automatic forced rebuild.
 
 ### 2. Discovery guard (`tool_call`)
 
 | Attempt | Verdict |
 | --- | --- |
-| `grep` / shell `rg` for a **concept** (`"where is auth handled?"`) | blocked → use `codebase_peek` |
+| Scoped `grep` / simple shell `rg` for a **concept** (`"where is auth handled?"`) | enforce: blocked; warn: hint only |
 | `grep` for an exact identifier/literal (`validateToken`, `-F` fixed strings) | allowed |
 | Shell **source read** (`cat`/`head`/`tail`/`sed`/`less`/`more` a file) | blocked → use `read` |
 | Shell **source write** (`>`/`>>` to a file, `tee <file>`, `sed -i`, `perl -i`) | blocked → use `edit`/`write` |
 | Toolchain commands (`git`, `npm`, `pytest`, …) and `2>/dev/null` / `2>&1` | allowed |
 
-The guard is deliberately conservative: single-token identifier-shaped patterns,
-fd redirects (`2>/dev/null`, `2>&1`), and normal toolchain commands are never
-blocked.
+The guard is deliberately conservative: exact identifiers/literals, fd redirects
+(`2>/dev/null`, `2>&1`), and normal toolchain commands pass through. **Built-in
+read/edit/write always pass**, even before any index query. Explicit outside
+paths, `../`, sibling or nested linked worktrees, symlink escapes (including new files under
+symlinked parents), cwd-changing shell commands, and shell targets whose scope
+cannot be proven all bypass guards. The indexed scope is exactly Pi's cwd, never
+an automatically widened repository root. Main-checkout evidence is not a
+prerequisite for sibling-worktree work. This is a workflow router, **not a
+security boundary**.
 
 ### 3. Optional background auto-indexing
 
-Off by default. When enabled, indexing runs **in the background** — a detached
-`opencode-codebase-index` MCP subprocess does the work. There is **no agent
+Off by default. When enabled, indexing runs **in the background** — a
+router-owned `opencode-codebase-index` MCP subprocess does the work. There is **no agent
 turn and no LLM cost**, and Pi is never blocked: you keep typing while the index
 refreshes into the same `.codebase-index/` directory Pi's `codebase_search`
 reads (host `pi`).
@@ -183,37 +200,104 @@ reads (host `pi`).
 | Env var | Effect |
 | --- | --- |
 | `PI_CODEBASE_AUTO_INDEX=1` | Background index on session start / resume / new / fork when the cwd looks like a project. |
-| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` | After a settled turn that used `write`/`edit`, background index once. |
-| `PI_CODEBASE_INDEX_BIN=/abs/path/dist/cli.js` | Point at the `opencode-codebase-index` CLI explicitly (otherwise auto-located under `~/.pi/agent/npm`, the project's `.pi/npm`, or `npx`). |
-| `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` | Revert to the legacy behavior: queue `/cbindex` as a follow-up **agent turn** instead of a background subprocess. |
+| `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` | After successful in-scope built-in `write`/`edit` calls settle, background index once. Failed/blocked/outside writes do not dirty the index. |
+| `PI_CODEBASE_INDEX_BIN=/abs/path/dist/cli.js` | Point at the companion CLI explicitly; otherwise locate it under Pi's agent npm directory or the trusted project's Pi npm directory. Never runs `npx` or installs anything. |
+| `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` | Explicitly request incremental `index_codebase` on a follow-up **agent turn** instead of a background subprocess. |
 
-Always an **incremental** index (never `force`), only in project directories
-(detected via `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`,
-`pom.xml`, `build.gradle`). At most one index runs at a time; writes that land
-during a run coalesce into a single follow-up index. The subprocess is killed on
-session shutdown (indexing is incremental and resumes next time). If the CLI
-can't be located or spawned, it automatically falls back to the follow-up-turn
-path.
+Always **incremental** (`force: false`) with `--project <cwd> --host pi`, using
+newline-delimited MCP JSON-RPC. Only project directories (Git, including nested
+cwd, or recognized project markers) are indexed. At most one run is active;
+writes during a successful run coalesce into one follow-up. Busy, transport,
+initialization, timeout, `isError`, partial embedding, and text-level failures
+are not reported as current and do not trigger retry churn. A missing/broken CLI
+shows a hint, **never an automatic agent-turn fallback**.
+
+`/cbrouter off` clears pending work, invalidates callbacks/reruns, and terminates
+router-owned indexing immediately (SIGTERM, then SIGKILL if needed). Shutdown
+does the same. This does **not** stop the companion extension's independent
+watcher/auto-indexer; configure that in the companion. Explicitly opting into
+`autoIndexViaTurn` can queue a real agent follow-up; Pi cannot retract an already
+queued message, so it may still run after off. The off command warns when this
+actually applies and schedules no new follow-ups.
 
 ## Configuration
 
-Settings resolve with precedence **env var > project `router.json` > global
-`router.json` > built-in default**. Nothing is required; the defaults are safe
-(`enforce` mode, no auto-indexing).
+Settings resolve with precedence **session override > env var > local
+`router.json` > global `router.json` > built-in default**. Nothing is required:
+`enforce` mode, no auto-indexing, and **linked worktrees bypassed by default**.
+
+### Runtime command (no LLM turn)
+
+```text
+/cbrouter off|on|toggle|warn|enforce|status|reset
+/cbrouter local off|on|toggle|warn|enforce|status|reset
+/cbrouter global off|on|toggle|warn|enforce|status|reset
+```
+
+Unscoped mode commands change the session override; `on` means `enforce`.
+`toggle` switches configured off/enforce. `reset` clears all session overrides.
+Overrides are appended to Pi session entries and restored on reload/resume of
+the same session ID (not inherited by a fork). Commands remain available while
+off. Scoped mode commands persist to the selected file; scoped `reset` removes
+only that file's `mode`. Higher layers still win; status reports each effective
+value and its source.
+
+### Settings screen
+
+```text
+/cbrouter                      # opens settings (also /cbrouter settings | config)
+/cbrouter-settings [global|local]
+/cbrouter settings [global|local]
+```
+
+The screen shows the selected scope and its actual file path, the effective
+mode/index status, environment and session overrides, and each setting's value
+in that file or where it is inherited from (`from global: warn`,
+`from default: off`). Values shadowed by a higher layer show that layer's value
+(`session: off`, `environment: …`, `local: …`).
+
+- **Tab** (or Enter on *Scope*) switches between the global and local file.
+  Without an argument, an existing trusted local file opens first; otherwise global.
+- **Enter** on a setting opens its choices or editor. Every choice is saved
+  immediately; **Inherit** removes the key from that file so the lower layer
+  applies (local inherit never copies or masks the global value).
+- *Index CLI* and *Index timeout* are text fields; an empty value inherits.
+  Invalid values and save failures (malformed file, untrusted project, write
+  error) stay on screen with the draft kept.
+- *Reset file* removes every router key from the selected file after a
+  confirmation choice (default Cancel). *Session overrides* clears all or one
+  `/cbrouter off|warn|enforce` override. Environment overrides can only be
+  removed by unsetting the shown variable.
+- **Esc** backs out of a choice/editor without saving and closes the screen.
+  Navigation, paging and confirm/cancel follow your Pi keybindings.
+
+In RPC mode the same settings are offered through native select/input/confirm
+dialogs. Print and JSON modes report the textual `/cbrouter` commands and both
+file paths instead. Untrusted projects show the local file as read-only.
+Integrators can reuse the [typed controller seam](docs/settings-controller.md).
 
 ### Config file — `router.json`
 
 | Scope | Path |
 | --- | --- |
 | Global | `~/.config/codebase-index/router.json` (respects `$XDG_CONFIG_HOME`) |
-| Project | `<repo>/.codebase-index/router.json` (overrides global) |
+| Local | `<cwd>/.codebase-index/router.json` (overrides global when trusted) |
 
-It sits next to the companion's `config.json`, so one dotfiles sync covers both.
-Re-read on `/reload` and on each new session. Example (all keys optional):
+It sits next to the companion's `config.json`. Files are re-read when settings
+are resolved; commands/saves apply immediately, no reload needed. The entire
+local layer is ignored unless `ctx.isProjectTrusted()` is true (Pi 1.5); local
+saves are rejected without creating files when untrusted. Session/global controls
+remain usable. Saves validate known keys, preserve unknown keys, atomically
+rename a same-directory temporary file at the resolved target, preserve existing
+symlinks and target permissions, and surface errors. Malformed JSON,
+arrays, and other non-object documents are never silently overwritten.
+
+Example (all keys optional):
 
 ```json
 {
   "mode": "enforce",
+  "worktreeMode": "off",
   "autoIndex": false,
   "autoIndexAfterWrite": true,
   "autoIndexViaTurn": false,
@@ -225,16 +309,18 @@ Re-read on `/reload` and on each new session. Example (all keys optional):
 
 | `router.json` key | Env override | Values | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `mode` | `PI_CODEBASE_ROUTER_MODE` | `enforce` \| `warn` \| `off` | `enforce` | `enforce` blocks discouraged calls; `warn` allows but shows a hint and still injects guidance; `off` disables everything. |
+| `mode` | `PI_CODEBASE_ROUTER_MODE` | `enforce` \| `warn` \| `off` | `enforce` | Guard/guidance mode; off also cancels router-owned indexing. Commands remain accessible. |
+| `worktreeMode` | `PI_CODEBASE_WORKTREE_MODE` | `off` \| `inherit` | `off` | Actual Git linked worktrees (including nested cwd) bypass guidance, guards, and auto-indexing unless opted in. Submodules are not confused with linked worktrees. |
 | `autoIndex` | `PI_CODEBASE_AUTO_INDEX` | bool | `false` | Background index on session start / resume / new / fork. |
-| `autoIndexAfterWrite` | `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE` | bool | `false` | Background index after a settled turn that used `write`/`edit`. |
+| `autoIndexAfterWrite` | `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE` | bool | `false` | Background index after successful scoped built-in `write`/`edit` calls settle. |
 | `autoIndexViaTurn` | `PI_CODEBASE_AUTO_INDEX_VIA_TURN` | bool | `false` | Use a follow-up **agent turn** instead of a background subprocess. |
 | `indexBin` | `PI_CODEBASE_INDEX_BIN` | path | auto | Explicit path to `opencode-codebase-index`'s `dist/cli.js`. |
-| `indexTimeoutMs` | `PI_CODEBASE_INDEX_TIMEOUT_MS` | int (ms) | `900000` | Background-index kill timeout. |
+| `indexTimeoutMs` | `PI_CODEBASE_INDEX_TIMEOUT_MS` | int (ms), 1–2147483647 | `900000` | Background-index kill timeout. |
 
 Env booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`. An env
-value always wins over the files — set `PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=0` to
-switch off a file `true` for one session.
+value wins over files, but a session override wins over env. Set
+`PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=0` to switch off a file `true`. Clear a
+session override to reveal env/files; editing a file cannot override env.
 
 ## Commands (prompt templates)
 
@@ -245,7 +331,8 @@ switch off a file `true` for one session.
 | `/cbreindex` | `index_codebase force` | Full rebuild. |
 | `/cbpeek <query>` | `codebase_peek` | Metadata-only locations (cheapest). |
 | `/cbsearch <query>` | `codebase_search` | Semantic search with content. |
-| `/cbfind <query>` | peek → lookup/search → grep | Token-efficient hybrid discovery. |
+| `/cbfind <query>` | context/lookup/search as needed | Scoped discovery, no mandatory chain. |
+| `/cbcontext <query>` | `codebase_context` | Compact unfamiliar-subsystem orientation (600 tokens / 5 results). |
 | `/cbdef <symbol>` | `implementation_lookup` | Authoritative definition site. |
 | `/cbcallgraph <name> [callers\|callees]` | `call_graph` | Callers/callees. |
 | `/cbpath <from> <to>` | `call_graph_path` | Shortest call path. |
@@ -254,18 +341,21 @@ switch off a file `true` for one session.
 
 ## Skill
 
-`indexed-codebase-workflow` documents the loop:
-`codebase_peek` → `implementation_lookup`/`codebase_search` → `read` exact lines
-→ `edit`/`write` → tests/diagnostics → inspect the diff. Load it with
-`/skill:indexed-codebase-workflow`.
+`indexed-codebase-workflow` documents readiness, optional compact orientation,
+direct definition/graph lookup, bounded source reads, precise edits, and tests.
+Load it with `/skill:indexed-codebase-workflow`.
 
 ## Compatibility
 
 - Pi loads the extension as TypeScript via jiti — no build step required.
-- Requires Node ≥ 18.
-- Peers (both optional/informational): `@earendil-works/pi-coding-agent`
-  (provided by the Pi runtime) and `opencode-codebase-index` (install
-  separately — see above; declared optional so it is not auto-downloaded).
+- Targets Pi coding-agent / pi-tui 1.5.0, Node ≥ 22.19.0 (matching both hosts).
+  See the [recent Pi changelog compatibility audit](docs/pi-compatibility.md) for
+  structured prompts, nested tool events, lifecycle, trust, UI, and release notes.
+- Requires `opencode-codebase-index` >=0.38.2, the tested companion API baseline.
+  Missing callable tools degrade to fallback rather than blocking normal work.
+- Optional peers: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
+  (provided by Pi), plus `opencode-codebase-index` (install separately; it is
+  not auto-downloaded).
 
 ## Migrating from a local copy
 
@@ -281,13 +371,17 @@ rm -f ~/.pi/agent/prompts/cb*.md
 
 ## Continuous integration & publishing
 
-- **CI** (`.github/workflows/ci.yml`): typechecks on every push/PR.
+- **CI** (`.github/workflows/ci.yml`): typecheck, tests, and pack dry-run on push/PR.
+- Local validation: `npm ci --ignore-scripts && npm run typecheck && npm test && npm pack --dry-run`.
+  Tests use mocked ExtensionAPI events/commands, isolated temp config, real Git
+  worktrees/submodules, and a fixture MCP child; no embedding server or companion
+  install is needed. Optional companion peer is not installed automatically.
 - **Publish** (`.github/workflows/publish.yml`): on a published GitHub Release
   it runs `npm publish --provenance --access public`. Manual runs
   (`workflow_dispatch`) support a `--dry-run`.
 
-One-time setup: add an npm **Automation** token as the `NPM_TOKEN` repository
-secret (`gh secret set NPM_TOKEN`). Release flow:
+One-time setup: configure npm **Trusted Publishing (OIDC)** for this repository
+and `publish.yml`; no `NPM_TOKEN` secret is used. Release flow:
 
 ```bash
 npm version patch   # or minor / major — bumps package.json + tags

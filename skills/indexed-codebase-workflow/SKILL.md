@@ -1,65 +1,69 @@
 ---
 name: indexed-codebase-workflow
-description: Token-efficient repository exploration and editing with opencode-codebase-index. Use before investigating unfamiliar code, tracing behavior, locating definitions, assessing impact, or making source changes.
+description: Scoped, token-efficient repository exploration and editing with opencode-codebase-index. Use for unfamiliar code, definitions, dependency flow, impact, and source changes without a mandatory retrieval chain.
 ---
 
 # Indexed codebase workflow
 
-Use the semantic index as the default navigation layer. It is local,
-branch-aware, and returns structured chunks instead of forcing broad file dumps
-into context.
+Use the index as a navigation layer **for its actual cwd**, not as a prerequisite
+for every read/edit. Built-in `read`, `edit`, and `write` are always allowed.
+This is workflow guidance, not a security boundary.
 
-## Route the question
+## Readiness and scope
 
-1. **Unknown concept, behavior, or location**: call `codebase_peek` first. Use a
-   focused natural-language query and a small `limit` (usually 5).
-2. **Authoritative definition**: call `implementation_lookup`.
-3. **Need implementation details**: read only the returned file and relevant
-   line range with the built-in `read` tool. Do not request full files by
-   default.
-4. **Need behavior or dependency flow**: use `call_graph` or
-   `call_graph_path` after discovering symbols.
-5. **Need change blast radius**: use `pr_impact` before merging or making risky
-   refactors.
-6. **Need actual indexed code context across several candidates**: call
-   `codebase_search` with `limit`, `fileType`, `directory`, `chunkType`, and
-   `contextLines=0` rather than dumping files.
+- Check `index_status` when readiness is unknown. Missing tools, an unindexed or
+  incompatible index, pending storage migration, or failed retrieval must not
+  trap the task: use known files, direct tools, and focused fallback discovery.
+- `/cbindex` / `index_codebase({ force: false })` performs an incremental update,
+  including storage migrations. Reserve force for an explicitly requested full
+  rebuild or provider/model incompatibility; never force automatically.
+- Do not use main-checkout evidence for a sibling worktree. Outside paths,
+  `../`, symlink escapes, and cwd-changing commands are outside this router's
+  proof. Do not widen a scoped miss beyond the indexed cwd/directory.
+- Linked Git worktrees (including nested cwd) bypass router guidance, guards,
+  and auto-indexing by default. Set router `worktreeMode: "inherit"` only when
+  intentionally using that worktree's own index. Submodules are not linked
+  worktrees.
 
-## Keep lexical search in its lane
+## Choose the tool for the question
 
-Use the built-in `grep` tool only for an exact known identifier, literal, regex,
-or exhaustive occurrence check. Do not use grep or shell `rg` to answer
-conceptual questions such as “where is authentication enforced?” Use `find`/`ls`
-only for filesystem inventory, not code discovery.
+- **Unfamiliar orientation** (layout, key symbols, cross-file intent): optionally
+  use `codebase_context` with `tokenBudget: 600`, `limit: 5` for a compact first
+  pass. Inspect evidence before broad reads; do not run it mechanically.
+- **Known definition**: use `implementation_lookup` directly, without context or
+  peek prerequisites. Read exact returned lines only if needed.
+- **Callers/callees**: `call_graph`; **dependency path**: `call_graph_path` once
+  endpoints are identified. **Blast radius**: `pr_impact`.
+- **Pre-edit evidence around a known/suspected target**: optionally
+  `codebase_edit_context` for bounded source and direct graph neighbors.
+- **Repository-scale map**: `architecture_context` when that scale is needed.
+- **Metadata-only locations**: optional `codebase_peek`. **Semantic source
+  matches**: `codebase_search`, scoped with small limits and appropriate
+  fileType/directory/chunkType/contextLines filters. Neither requires context
+  first; do not repeat broad reads when compact evidence answers the question.
 
-Use the built-in `read`, `edit`, and `write` tools for file access and source
-mutations. Avoid `cat`, `sed`, `head`, `tail`, shell redirection, `tee`,
-`sed -i`, and `perl -i` for source files.
+## Files, lexical search, and edits
 
-## Index readiness
+Reserve `grep` for exact known identifiers/literals or exhaustive occurrence
+checks when the index is usable. Use `find`/`ls` for filesystem inventory. When
+indexed discovery is unavailable, allow focused fallback rather than repeatedly
+requesting broken tools. Use built-in `read`/`edit`/`write` for source contents
+and mutations; prefer them over shell cat/sed/tee/redirection. Run relevant
+tests/diagnostics and inspect the diff after edits.
 
-- Run `index_status` when the index may be missing, stale, or incompatible.
-- Use `/cbindex` or `index_codebase` for a normal incremental update.
-- Use `/cbindex force` or `index_codebase({ force: true })` only for a full
-  rebuild, corruption, or provider/model incompatibility.
-- Do not automatically force-reindex after every edit; normal indexing is
-  incremental. In Pi, opt into the after-write hook if automatic refresh is
-  required.
+## Router controls and optional background indexing
 
-## Optional background indexing
+`/cbrouter off|on|toggle|warn|enforce|status|reset` changes a durable same-session
+override. `on` means enforce; reset clears session overrides. Local/global scoped
+mode commands persist to router.json. Precedence is session > env > local >
+global > defaults. Untrusted local settings are ignored and cannot be saved;
+session/global controls remain available. Commands work while off.
 
 `PI_CODEBASE_AUTO_INDEX=1` (session start) and
-`PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` (after a settled write/edit turn) trigger
-an **incremental** index. It runs in the background as a detached
-`opencode-codebase-index` subprocess — no agent turn, no LLM cost, non-blocking
-— into the same `.codebase-index/` directory the search tools read. Never a
-force rebuild. Set `PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` to use a follow-up agent
-turn instead.
-
-## Compact workflow
-
-`codebase_peek` → `implementation_lookup`/`codebase_search` as needed → `read`
-exact lines → edit/write → tests or diagnostics → inspect the diff.
-
-If indexed search is weak, check `index_status` before falling back to grep. Use
-web search only after local indexed code and documentation fail.
+`PI_CODEBASE_AUTO_INDEX_AFTER_WRITE=1` (successful scoped built-in edit/write,
+then agent settled) opt into an incremental background MCP child, host `pi`.
+No LLM turn or package install occurs by default. Errors/busy results are not
+current and do not cause retry churn. Off/shutdown cancel router-owned pending
+work and children, **not the companion's own watcher**. Only explicit
+`PI_CODEBASE_AUTO_INDEX_VIA_TURN=1` uses an agent follow-up; Pi cannot retract an
+already queued follow-up, so it may still run after off.

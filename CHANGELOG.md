@@ -3,6 +3,69 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-03
+
+### Added
+
+- Runtime `/cbrouter off|on|toggle|warn|enforce|status|reset` controls with durable
+  same-session overrides, plus scoped local/global persistent mode commands.
+- Typed settings controller under `src/` and a documented UI integration seam.
+  Effective values/sources, clearing layer overrides, strict validation,
+  unknown-key preservation, atomic file saves, and surfaced save failures.
+- Settings screen: `/cbrouter-settings [global|local]`, bare `/cbrouter`, and
+  `/cbrouter settings|config [global|local]`. Shows the scope and its file path,
+  effective status, env/session overrides and per-file inheritance; mode,
+  worktree, auto-index, index CLI and timeout edits apply immediately, with
+  inherit/reset per file and session-override clearing. Native dialogs in RPC;
+  actionable command usage in print/JSON. `@earendil-works/pi-tui` is an optional
+  host-provided peer.
+- `worktreeMode: off|inherit` / `PI_CODEBASE_WORKTREE_MODE`, default off for actual
+  linked Git worktrees including nested cwd. Submodules are distinguished.
+- Compact optional `/cbcontext` orientation and context/edit-context/architecture
+  counters. Mocked ExtensionAPI, temp-config, real-worktree/submodule, and MCP
+  subprocess regression tests; CI runs tests, typecheck, and pack dry-run.
+- Pi 1.5 / 1.4 / 1.2 / 1.0 compatibility audit and current UI API handoff, with
+  structured-prompt, nested-event/final-settle, MCP status, runtime minimum, and
+  shipped version-matched package-changelog regressions.
+
+### Fixed
+
+- Current companion compatibility: readiness/status/migration handling, optional
+  compact orientation, direct definition/graph tools, no mandatory peek chain,
+  and custom-message starts without a prompt.
+- Built-in read/edit/write always allowed; guards fail open for outside paths,
+  parent traversal, sibling worktrees, symlink escapes/new-file parents, cwd
+  changes, ambiguous shell scope, missing tools, and broken indexes.
+- Successful scoped writes alone schedule after-write indexing, with inputs
+  captured by toolCallId. Failed/blocked/outside writes never dirty the index.
+- MCP newline transport, explicit incremental force:false and Pi host/project
+  arguments, initialization/isError/busy/text/partial-index failures, child and
+  timer cleanup, cancellation, and coalesced reruns. Off/shutdown invalidate
+  pending work and stale callbacks; no surprise agent-turn or npx fallback.
+- Source snippets and query-validation errors no longer determine index health or
+  enter routing prompts. Operational errors use bounded diagnostics, and healthy
+  text-only MCP status can recover readiness.
+- Worktrees nested inside the indexed cwd bypass guards and mutation indexing;
+  worktree detection also works without newer Git path-format flags.
+- Atomic settings saves preserve dotfile-manager symlinks and target permissions.
+- Consumed legacy index follow-ups no longer suppress future indexing requests.
+  Text commands report status in print and JSON modes without model turns.
+- Entire untrusted local config is ignored and local saves/CLI discovery require
+  Pi project trust. Session/global controls remain available while untrusted/off.
+
+### Changed
+
+- Precedence is now session > env > local > global > defaults. Current Pi 1.5
+  development types and Node >=22.19.0 (matching coding-agent and pi-tui);
+  optional companion >=0.38.2 remains a separate install. CI includes the exact minimum
+  Node release. Updated README/skill/prompts and corrected OIDC guidance.
+- Routing guidance now mutates only systemPromptOptions.sections.codebase_router
+  rather than replacing the complete system prompt; inactive/custom/non-code
+  starts clear that owned section without disturbing other prompt contributions.
+- Off only stops router-owned work, not the companion watcher. Explicit opt-in
+  agent follow-ups already queued in Pi cannot be retracted; commands warn when
+  this applies rather than aborting the user's run.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added

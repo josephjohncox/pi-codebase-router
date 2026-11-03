@@ -1,6 +1,6 @@
 {
   "name": "pi-codebase-router",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Index-first routing for Pi: prefer the opencode-codebase-index semantic index over grep/shell, with guardrails, cb* prompts, a workflow skill, and optional session-start / after-write auto-indexing.",
   "type": "module",
   "license": "MIT",
@@ -25,10 +25,12 @@
     "developer-tools"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "files": [
     "extensions",
+    "src",
+    "docs",
     "skills",
     "prompts",
     "README.md",
@@ -47,14 +49,19 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "opencode-codebase-index": ">=0.14.0"
+    "@earendil-works/pi-tui": "*",
+    "opencode-codebase-index": ">=0.38.2"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     },
     "opencode-codebase-index": {
@@ -62,8 +69,10 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@earendil-works/pi-tui": "^1.5.0",
     "@types/node": "^22.0.0",
+    "tsx": "^4.23.0",
     "typescript": "^5.6.0"
   },
   "publishConfig": {
