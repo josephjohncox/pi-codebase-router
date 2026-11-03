@@ -26,12 +26,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          cache: npm
+          node-version: 24
+          package-manager-cache: false
+      # Public dependencies need no registry token. Do not synthesize an .npmrc
+      # _authToken entry: publication authenticates with the job's OIDC identity.
       # Trusted publishing (OIDC) requires npm >= 11.5.1; upgrade the bundled npm.
       - name: Upgrade npm for trusted publishing
         run: npm install -g npm@latest
@@ -50,4 +51,4 @@ jobs:
           fi
       # No NODE_AUTH_TOKEN: npm requests an OIDC token from GitHub automatically.
       - name: Publish
-        run: npm publish --provenance --access public ${{ (github.event_name == 'workflow_dispatch' && inputs.dry-run) && '--dry-run' || '' }}
+        run: npm publish --provenance --access public --loglevel=http ${{ (github.event_name == 'workflow_dispatch' && inputs.dry-run) && '--dry-run' || '' }}
